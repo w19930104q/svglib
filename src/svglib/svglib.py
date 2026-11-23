@@ -1256,6 +1256,239 @@ _BEZIER_KAPPA = 0.5523  # cubic bezier constant for circle approximation
 # Match values: url(#name), url('#name'), url("#name"), url( "#name" )
 _GRADIENT_URL_RE = re.compile(r"""url\(\s*(['"]?)#([^'"]+?)\1\s*\)""")
 
+# A path segment for marker placement: start point, end point, and the
+# direction (tangent) vectors of the path at those two points.
+_MarkerSegment = tuple[
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+    tuple[float, float],
+]
+# A vertex for marker placement: x, y, incoming angle and outgoing angle in
+# degrees; an angle is None where the path has no direction (subpath ends).
+_MarkerVertex = tuple[float, float, Optional[float], Optional[float]]
+
+
+def _vector_angle(vector: tuple[float, float]) -> Optional[float]:
+    """Return the angle in degrees of a vector, or None if it has no length."""
+    x, y = vector
+    if math.hypot(x, y) <= 1e-12:
+        return None
+    return math.degrees(math.atan2(y, x))
+
+
+def _bisector_angle(
+    angle_in: Optional[float], angle_out: Optional[float]
+) -> Optional[float]:
+    """Return the average of two angles in degrees, for mid-marker orientation."""
+    if angle_in is None:
+        return angle_out
+    if angle_out is None:
+        return angle_in
+    x = math.cos(math.radians(angle_in)) + math.cos(math.radians(angle_out))
+    y = math.sin(math.radians(angle_in)) + math.sin(math.radians(angle_out))
+    if math.hypot(x, y) <= 1e-12:
+        # Opposite directions (a 180° turn): the bisector is undefined.
+        return angle_in
+    return math.degrees(math.atan2(y, x))
+
+
+def _vertices_from_segments(segments: list[_MarkerSegment]) -> list[_MarkerVertex]:
+    """Turn the segments of one subpath into vertices for marker placement.
+
+    The first vertex has no incoming angle and the last one no outgoing angle,
+    unless the subpath was closed with a segment back to its start.
+    """
+    vertices = []
+    previous: Optional[_MarkerSegment] = None
+    for segment in segments:
+        p0, _, out_vector, _ = segment
+        angle_in = _vector_angle(previous[3]) if previous is not None else None
+        vertices.append((p0[0], p0[1], angle_in, _vector_angle(out_vector)))
+        previous = segment
+    # The final vertex is the end point of the last segment.
+    _, p1, _, in_vector = segments[-1]
+    vertices.append((p1[0], p1[1], _vector_angle(in_vector), None))
+    return vertices
+
+
+def _nonzero_vector(*vectors: tuple[float, float]) -> tuple[float, float]:
+    """Return the first vector with a non-negligible length, or a zero vector."""
+    for vector in vectors:
+        if math.hypot(*vector) > 1e-12:
+            return vector
+    return (0.0, 0.0)
+
+
+def _path_marker_segments(d: str) -> list[list[_MarkerSegment]]:
+    """Extract the segments of each subpath of a path data string, with the
+    tangent vectors markers need at their ends. Zero-length segments and
+    subpaths without any drawn segment are dropped.
+    """
+    normPath = normalise_svg_path(d)
+    subpaths: list[list[_MarkerSegment]] = []
+    segments: list[_MarkerSegment] = []
+    current = (0.0, 0.0)
+    subpath_start = (0.0, 0.0)
+    lastop = ""
+    last_cubic_cp: Optional[tuple[float, float]] = None
+    last_quadratic_cp: Optional[tuple[float, float]] = None
+
+    def add_line(p0: tuple[float, float], p1: tuple[float, float]) -> None:
+        vector = (p1[0] - p0[0], p1[1] - p0[1])
+        if math.hypot(*vector) > 1e-12:
+            segments.append((p0, p1, vector, vector))
+
+    def add_cubic(
+        p0: tuple[float, float],
+        c1: tuple[float, float],
+        c2: tuple[float, float],
+        p1: tuple[float, float],
+    ) -> None:
+        out_vector = _nonzero_vector(
+            (c1[0] - p0[0], c1[1] - p0[1]),
+            (c2[0] - p0[0], c2[1] - p0[1]),
+            (p1[0] - p0[0], p1[1] - p0[1]),
+        )
+        in_vector = _nonzero_vector(
+            (p1[0] - c2[0], p1[1] - c2[1]),
+            (p1[0] - c1[0], p1[1] - c1[1]),
+            (p1[0] - p0[0], p1[1] - p0[1]),
+        )
+        if out_vector != (0.0, 0.0) or in_vector != (0.0, 0.0):
+            segments.append((p0, p1, out_vector, in_vector))
+
+    def flush() -> None:
+        nonlocal segments
+        if segments:
+            subpaths.append(segments)
+        segments = []
+
+    for i in range(0, len(normPath), 2):
+        op: str
+        nums: list[float]
+        op, nums = normPath[i : i + 2]  # type: ignore
+
+        if op in ("M", "m"):
+            flush()
+            if op == "m" and lastop not in ("", "Z", "z"):
+                current = (current[0] + nums[0], current[1] + nums[1])
+            elif op == "m" and lastop in ("Z", "z"):
+                current = (subpath_start[0] + nums[0], subpath_start[1] + nums[1])
+            else:
+                current = (nums[0], nums[1])
+            subpath_start = current
+        elif op == "L":
+            target = (nums[0], nums[1])
+            add_line(current, target)
+            current = target
+        elif op == "l":
+            target = (current[0] + nums[0], current[1] + nums[1])
+            add_line(current, target)
+            current = target
+        elif op == "H":
+            target = (nums[0], current[1])
+            add_line(current, target)
+            current = target
+        elif op == "h":
+            target = (current[0] + nums[0], current[1])
+            add_line(current, target)
+            current = target
+        elif op == "V":
+            target = (current[0], nums[0])
+            add_line(current, target)
+            current = target
+        elif op == "v":
+            target = (current[0], current[1] + nums[0])
+            add_line(current, target)
+            current = target
+        elif op in ("C", "c", "S", "s"):
+            if op in ("S", "s"):
+                if lastop in ("c", "C", "s", "S") and last_cubic_cp is not None:
+                    c1 = (
+                        2 * current[0] - last_cubic_cp[0],
+                        2 * current[1] - last_cubic_cp[1],
+                    )
+                    x2, y2 = nums[0], nums[1]
+                else:
+                    c1 = current
+                    x2, y2 = nums[0], nums[1]
+                if op == "s":
+                    c2 = (current[0] + x2, current[1] + y2)
+                    target = (current[0] + nums[2], current[1] + nums[3])
+                else:
+                    c2 = (x2, y2)
+                    target = (nums[2], nums[3])
+            else:
+                if op == "c":
+                    c1 = (current[0] + nums[0], current[1] + nums[1])
+                    c2 = (current[0] + nums[2], current[1] + nums[3])
+                    target = (current[0] + nums[4], current[1] + nums[5])
+                else:
+                    c1 = (nums[0], nums[1])
+                    c2 = (nums[2], nums[3])
+                    target = (nums[4], nums[5])
+            add_cubic(current, c1, c2, target)
+            last_cubic_cp = c2
+            current = target
+        elif op in ("Q", "q", "T", "t"):
+            if op in ("T", "t"):
+                if last_quadratic_cp is not None:
+                    control = (
+                        2 * current[0] - last_quadratic_cp[0],
+                        2 * current[1] - last_quadratic_cp[1],
+                    )
+                else:
+                    control = current
+                if op == "t":
+                    target = (current[0] + nums[0], current[1] + nums[1])
+                else:
+                    target = (nums[0], nums[1])
+            else:
+                if op == "q":
+                    control = (current[0] + nums[0], current[1] + nums[1])
+                    target = (current[0] + nums[2], current[1] + nums[3])
+                else:
+                    control = (nums[0], nums[1])
+                    target = (nums[2], nums[3])
+            last_quadratic_cp = control
+            (_, _), (x1, y1), (x2, y2), (_, _) = convert_quadratic_to_cubic_path(
+                current, control, target
+            )
+            add_cubic(current, (x1, y1), (x2, y2), target)
+            current = target
+        elif op in ("A", "a"):
+            rx, ry, phi, fA, fS, x2, y2 = nums
+            if op == "a":
+                x2 += current[0]
+                y2 += current[1]
+            target = (x2, y2)
+            if abs(rx) <= 1e-10 or abs(ry) <= 1e-10:
+                add_line(current, target)
+            else:
+                bp = bezier_arc_from_end_points(
+                    current[0], current[1], rx, ry, phi, int(fA), int(fS), x2, y2
+                )
+                for _, _, x1, y1, bx2, by2, xn, yn in bp:
+                    add_cubic(current, (x1, y1), (bx2, by2), (xn, yn))
+                    current = (xn, yn)
+            current = target
+        elif op in ("Z", "z"):
+            add_line(current, subpath_start)
+            current = subpath_start
+            flush()
+        else:
+            logger.debug("Suspicious path operator: %s", op)
+
+        if op not in ("C", "c", "S", "s"):
+            last_cubic_cp = None
+        if op not in ("Q", "q", "T", "t"):
+            last_quadratic_cp = None
+        lastop = op
+
+    flush()
+    return subpaths
+
 
 def _shape_to_pdf_path(canvas: Any, shape: Any) -> Any:
     """Convert a ReportLab shape to a PDFPathObject for use as a clip path.
@@ -1504,6 +1737,8 @@ class SvgRenderer:
         self._external_svgs: dict[str, ExternalSVG] = {}
         self._use_expansions = _UseExpansionCounter()
         self._use_stack: list[str] = []  # Targets being expanded, to detect cycles.
+        # Markers being rendered, to bail out of marker self-references.
+        self._rendering_markers: set[int] = set()
         self.attrConverter.css_rules = CSSMatcher()
 
     def _set_root_font_size(self, root_node: Any) -> None:
@@ -1609,6 +1844,13 @@ class SvgRenderer:
                 parent.add(item)
         elif name == "clipPath":
             item = self.renderG(node)
+        elif name == "marker":
+            # Markers are not drawn by themselves; they are rendered at the
+            # vertices of the shapes referencing them. Keep the node so that
+            # marker-start/mid/end properties can find it.
+            ignored = True
+            if nid:
+                self.definitions[nid] = node
         elif name in ("linearGradient", "radialGradient"):
             self.renderGradient(node)
             ignored = True
@@ -1645,6 +1887,12 @@ class SvgRenderer:
                     grad_def = self._resolve_gradient(grad_id)
                     if grad_def is not None:
                         item = self._apply_gradient_fill(item, grad_def)
+                markers = self._markers_for_shape(node, name)
+                if markers is not None:
+                    group = Group()
+                    group.add(item)
+                    group.add(markers)
+                    item = group
                 parent.add(item)
         else:
             ignored = True
@@ -1835,6 +2083,186 @@ class SvgRenderer:
         group = Group()
         group.add(grad_shape)
         group.add(item)
+        return group
+
+    def _markers_for_shape(self, node: NodeTracker, name: str) -> Optional[Group]:
+        """Render the marker-start/mid/end markers of a shape, if it has any.
+
+        Args:
+            node: The NodeTracker of the shape carrying the marker properties.
+            name: The shape name (e.g. "path", "line").
+
+        Returns:
+            A Group with one rendered marker instance per marked vertex, or
+            None when the shape has no marker to render.
+        """
+        ac = self.attrConverter
+        marker_nodes: dict[str, Any] = {}
+        for kind in ("marker-start", "marker-mid", "marker-end"):
+            # "marker" is the shorthand setting all three properties at once.
+            value = (ac.findAttr(node, kind) or ac.findAttr(node, "marker")).strip()
+            if not value or value == "none":
+                continue
+            match = _GRADIENT_URL_RE.fullmatch(value)
+            if not match:
+                logger.debug("Ignoring unparsable %s value %r", kind, value)
+                continue
+            marker_node = self.definitions.get(match.group(2))
+            if marker_node is None:
+                logger.debug(
+                    "Ignoring reference to undefined marker %r", match.group(2)
+                )
+                continue
+            marker_nodes[kind] = marker_node
+        if not marker_nodes:
+            return None
+        subpaths = self.shape_converter.marker_vertices(name, node)
+        if not subpaths:
+            return None
+
+        group = Group()
+        for subpath in subpaths:
+            placements: list[tuple[str, float, float, float]] = []
+            start = subpath[0]
+            end = subpath[-1]
+            if "marker-start" in marker_nodes:
+                angle = start[3]
+                if angle is None:
+                    # Degenerate first segment: use the first defined direction.
+                    angle = next((v[3] for v in subpath if v[3] is not None), None)
+                if angle is not None:
+                    placements.append(("marker-start", start[0], start[1], angle))
+            if "marker-end" in marker_nodes:
+                angle = end[2]
+                if angle is None:
+                    # Degenerate last segment: use the last defined direction.
+                    angle = next(
+                        (v[2] for v in reversed(subpath) if v[2] is not None), None
+                    )
+                if angle is not None:
+                    placements.append(("marker-end", end[0], end[1], angle))
+            if "marker-mid" in marker_nodes:
+                for x, y, angle_in, angle_out in subpath[1:-1]:
+                    angle = _bisector_angle(angle_in, angle_out)
+                    if angle is not None:
+                        placements.append(("marker-mid", x, y, angle))
+            for kind, x, y, angle in placements:
+                marker = self._render_marker(marker_nodes[kind], node, x, y, angle)
+                if marker is not None:
+                    group.add(marker)
+        return group if group.contents else None
+
+    def _render_marker(
+        self,
+        marker_node: Any,
+        shape_node: NodeTracker,
+        x: float,
+        y: float,
+        angle: float,
+    ) -> Optional[Group]:
+        """Render one instance of a marker, aligned on a vertex of a shape.
+
+        The (refX, refY) point of the marker lands on the vertex (x, y) and
+        the marker is rotated by angle (its orient="auto" direction), per
+        SVG spec §11.6. markerUnits, viewBox and preserveAspectRatio are
+        honored; the marker viewport is not clipped (overflow is ignored).
+        """
+        marker_key = id(marker_node.etree_element)
+        if marker_key in self._rendering_markers:
+            # A marker referencing itself, directly or not.
+            return None
+        ac = self.attrConverter
+        getAttr = marker_node.getAttribute
+        # Single lengths: these attributes never hold a list of values.
+        ref_x = cast(float, ac.convertLength(getAttr("refX"), attr_name="x"))
+        ref_y = cast(float, ac.convertLength(getAttr("refY"), attr_name="y"))
+        marker_width = cast(
+            float,
+            ac.convertLength(getAttr("markerWidth"), attr_name="width", default=3.0),
+        )
+        marker_height = cast(
+            float,
+            ac.convertLength(getAttr("markerHeight"), attr_name="height", default=3.0),
+        )
+        if not marker_width or not marker_height:
+            return None
+
+        orient = (getAttr("orient") or "0").strip()
+        if orient == "auto":
+            rotation = angle
+        elif orient == "auto-start-reverse":
+            rotation = angle + 180
+        else:
+            try:
+                rotation = float(orient.removesuffix("deg"))
+            except ValueError:
+                logger.debug("Ignoring invalid marker orient %r", orient)
+                rotation = 0.0
+
+        transforms = [f"translate({x} {y})"]
+        if rotation:
+            transforms.append(f"rotate({rotation})")
+        if (getAttr("markerUnits") or "strokeWidth") == "strokeWidth":
+            stroke_width = ac.findAttr(shape_node, "stroke-width")
+            try:
+                scale = (
+                    float(cast(float, ac.convertLength(stroke_width)))
+                    if stroke_width
+                    else 1.0
+                )
+            except (TypeError, ValueError):
+                scale = 1.0
+            if scale and scale != 1:
+                transforms.append(f"scale({scale})")
+
+        view_box = self.get_box(marker_node)
+        if view_box.width and view_box.height:
+            sx = marker_width / view_box.width
+            sy = marker_height / view_box.height
+            par = (getAttr("preserveAspectRatio") or "xMidYMid meet").strip()
+            tokens = par.split()
+            align = tokens[0] if tokens else "xMidYMid"
+            meet_or_slice = tokens[1] if len(tokens) > 1 else "meet"
+            if align == "none":
+                transforms.append(f"scale({sx} {sy})")
+            else:
+                scale = max(sx, sy) if meet_or_slice == "slice" else min(sx, sy)
+                scaled_w = view_box.width * scale
+                scaled_h = view_box.height * scale
+                if align.startswith("xMin"):
+                    tx = 0.0
+                elif align.startswith("xMax"):
+                    tx = marker_width - scaled_w
+                else:  # xMid (default)
+                    tx = (marker_width - scaled_w) / 2
+                if "YMin" in align:
+                    ty = 0.0
+                elif "YMax" in align:
+                    ty = marker_height - scaled_h
+                else:  # YMid (default)
+                    ty = (marker_height - scaled_h) / 2
+                if tx or ty:
+                    transforms.append(f"translate({tx} {ty})")
+                transforms.append(f"scale({scale})")
+            transforms.append(f"translate({-view_box.x} {-view_box.y})")
+        if ref_x or ref_y:
+            transforms.append(f"translate({-ref_x} {-ref_y})")
+
+        self._rendering_markers.add(marker_key)
+        try:
+            content = self.renderG(marker_node)
+        finally:
+            self._rendering_markers.discard(marker_key)
+        if not content.contents:
+            return None
+        group = Group()
+        group.add(content)
+        # The marker is placed in the coordinate system of the referencing
+        # shape, so the shape's own transform applies to the marker too.
+        shape_transform = shape_node.getAttribute("transform")
+        if shape_transform:
+            self.shape_converter.applyTransformOnGroup(shape_transform, group)
+        self.shape_converter.applyTransformOnGroup(" ".join(transforms), group)
         return group
 
     def get_display(self, node: NodeTracker) -> str:
@@ -3028,6 +3456,82 @@ class Svg2RlgShapeConverter(SvgShapeConverter):
 
         gr.add(path)
         return gr
+
+    def marker_vertices(self, name: str, node: Any) -> list[list[_MarkerVertex]]:
+        """Return the vertices of a markable shape, for marker placement.
+
+        Each subpath is a list of (x, y, angle_in, angle_out) vertices, with
+        the angles in degrees and None where the path has no direction.
+        Shapes that cannot carry markers return an empty list.
+        """
+        subpaths: list[list[_MarkerSegment]] = []
+        if name == "path":
+            d = node.get("d")
+            if d:
+                subpaths = _path_marker_segments(d)
+        elif name == "line":
+            x1, y1, x2, y2 = self.convert_length_attrs(node, "x1", "y1", "x2", "y2")
+            vector = (x2 - x1, y2 - y1)
+            if math.hypot(*vector) > 1e-12:
+                subpaths = [[((x1, y1), (x2, y2), vector, vector)]]
+        elif name in ("polyline", "polygon"):
+            raw_points = node.getAttribute("points")
+            values = raw_points.replace(",", " ").split()
+            try:
+                coords = [float(self.attrConverter.convertLength(v)) for v in values]  # type: ignore
+            except ValueError:
+                return []
+            if len(coords) % 2 != 0 or not coords:
+                return []
+            points = list(zip(coords[0::2], coords[1::2]))
+            segments = []
+            pairs = list(zip(points, points[1:]))
+            if name == "polygon" and len(points) > 1:
+                pairs.append((points[-1], points[0]))
+            for p0, p1 in pairs:
+                vector = (p1[0] - p0[0], p1[1] - p0[1])
+                if math.hypot(*vector) > 1e-12:
+                    segments.append((p0, p1, vector, vector))
+            if segments:
+                subpaths = [segments]
+        elif name == "rect":
+            x, y, width, height = self.convert_length_attrs(
+                node, "x", "y", "width", "height"
+            )
+            if width > 0 and height > 0:
+                corners = [
+                    (x, y),
+                    (x + width, y),
+                    (x + width, y + height),
+                    (x, y + height),
+                ]
+                segments = []
+                for p0, p1 in zip(corners, corners[1:] + corners[:1]):
+                    vector = (p1[0] - p0[0], p1[1] - p0[1])
+                    segments.append((p0, p1, vector, vector))
+                subpaths = [segments]
+        elif name in ("circle", "ellipse"):
+            if name == "circle":
+                cx, cy, r = self.convert_length_attrs(node, "cx", "cy", "r")
+                rx = ry = r
+            else:
+                cx, cy, rx, ry = self.convert_length_attrs(node, "cx", "cy", "rx", "ry")
+            if rx > 0 and ry > 0:
+                # The equivalent path of a circle/ellipse goes clockwise from
+                # its 3 o'clock point (SVG spec §11.4/11.5, appendix).
+                points = [
+                    (cx + rx, cy),
+                    (cx, cy + ry),
+                    (cx - rx, cy),
+                    (cx, cy - ry),
+                ]
+                tangents = [(0.0, ry), (-rx, 0.0), (0.0, -ry), (rx, 0.0)]
+                segments = [
+                    (p0, p1, tangents[i], tangents[(i + 1) % 4])
+                    for i, (p0, p1) in enumerate(zip(points, points[1:] + points[:1]))
+                ]
+                subpaths = [segments]
+        return [_vertices_from_segments(segments) for segments in subpaths]
 
     def convertImage(self, node: Any) -> Any:
         """Convert an SVG <image> element to a ReportLab Image."""

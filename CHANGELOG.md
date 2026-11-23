@@ -9,6 +9,17 @@
   it, so the PyPy job failed at import time. The other jobs follow
   `ubuntu-latest`.
 
+### Added
+
+- `<marker>` elements are now rendered: `marker-start`, `marker-mid` and
+  `marker-end` (and the `marker` shorthand), as presentation attributes, in
+  `style` attributes and in `<style>` rules, draw the referenced marker on the
+  vertices of paths, lines, polylines, polygons, rectangles, circles and
+  ellipses. `refX`/`refY` align the marker on the vertex, `orient="auto"` and
+  `auto-start-reverse` rotate it along the path direction, and `markerUnits`,
+  `markerWidth`/`markerHeight`, `viewBox` and `preserveAspectRatio` are
+  honored. The marker viewport is not clipped (`overflow` is ignored).
+
 ### Fixed
 
 - CSS font-size keywords such as `large`, `x-small`, `larger` and `smaller`,

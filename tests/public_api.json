@@ -359,6 +359,7 @@
     "convertText",
     "convertTextPath",
     "convert_length_attrs",
+    "marker_vertices",
     "shapeToPath"
    ],
    "what": "class(POSITIONAL_OR_KEYWORD:path, POSITIONAL_OR_KEYWORD:attrConverter)"
@@ -369,6 +370,8 @@
    ],
    "members": [
     "_apply_gradient_fill",
+    "_markers_for_shape",
+    "_render_marker",
     "_render_svg_in_image",
     "_resolve_gradient",
     "_set_root_font_size",
@@ -471,6 +474,12 @@
   "_MAX_VAR_REPLACEMENTS": {
    "what": "constant 1000"
   },
+  "_MarkerSegment": {
+   "what": "external"
+  },
+  "_MarkerVertex": {
+   "what": "external"
+  },
   "_UseExpansionCounter": {
    "bases": [
     "object"
@@ -489,6 +498,9 @@
    ],
    "members": [],
    "what": "class()"
+  },
+  "_bisector_angle": {
+   "what": "callable(POSITIONAL_OR_KEYWORD:angle_in, POSITIONAL_OR_KEYWORD:angle_out)"
   },
   "_convert_palette_to_rgba": {
    "what": "callable(POSITIONAL_OR_KEYWORD:image)"
@@ -514,6 +526,9 @@
   "_is_inside_text_path": {
    "what": "callable(POSITIONAL_OR_KEYWORD:node, POSITIONAL_OR_KEYWORD:text_node)"
   },
+  "_nonzero_vector": {
+   "what": "callable(VAR_POSITIONAL:vectors)"
+  },
   "_oklab_color": {
    "what": "callable(POSITIONAL_OR_KEYWORD:keyword)"
   },
@@ -523,11 +538,20 @@
   "_parse_font_shorthand": {
    "what": "callable(POSITIONAL_OR_KEYWORD:value)"
   },
+  "_path_marker_segments": {
+   "what": "callable(POSITIONAL_OR_KEYWORD:d)"
+  },
   "_renderPath": {
    "what": "external"
   },
   "_shape_to_pdf_path": {
    "what": "callable(POSITIONAL_OR_KEYWORD:canvas, POSITIONAL_OR_KEYWORD:shape)"
+  },
+  "_vector_angle": {
+   "what": "callable(POSITIONAL_OR_KEYWORD:vector)"
+  },
+  "_vertices_from_segments": {
+   "what": "callable(POSITIONAL_OR_KEYWORD:segments)"
   },
   "_without_important": {
    "what": "callable(POSITIONAL_OR_KEYWORD:value)"
