@@ -45,6 +45,7 @@ and some selected [symbols from Wikipedia](https://en.wikipedia.org/wiki/List_of
 - install a Python package named `svglib`
 - install a Python command-line script named `svg2pdf`
 - support SVG linear and radial gradients
+- support SVG `<pattern>` fills with `userSpaceOnUse` and `objectBoundingBox` units
 - support SVG `<switch>` elements with conditional rendering
 - provide a [PyTest](http://pytest.org) test suite with over 90% code coverage
 - test entire [W3C SVG test suite](http://www.w3.org/Graphics/SVG/WG/wiki/Test_Suite_Overview) after pulling from the internet

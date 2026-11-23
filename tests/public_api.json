@@ -369,8 +369,12 @@
    ],
    "members": [
     "_apply_gradient_fill",
+    "_apply_pattern_fill",
+    "_pattern_node",
+    "_render_pattern_tile",
     "_render_svg_in_image",
     "_resolve_gradient",
+    "_resolve_pattern",
     "_set_root_font_size",
     "_warn_old_inkscape",
     "apply_node_attr_to_group",
@@ -384,6 +388,7 @@
     "renderG",
     "renderGradient",
     "renderNode",
+    "renderPattern",
     "renderStyle",
     "renderSvg",
     "renderSwitch",
@@ -470,6 +475,13 @@
   },
   "_MAX_VAR_REPLACEMENTS": {
    "what": "constant 1000"
+  },
+  "_PatternDef": {
+   "bases": [
+    "dict"
+   ],
+   "members": [],
+   "what": "class(?)"
   },
   "_UseExpansionCounter": {
    "bases": [

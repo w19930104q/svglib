@@ -11,6 +11,11 @@
 
 ### Fixed
 
+- A `fill="url(#…)"` referencing a `<pattern>` is now rendered: the pattern
+  is tiled in user space or relative to the shape's bounding box according to
+  `patternUnits` (and `patternContentUnits`), clipped to the shape outline.
+  Such shapes previously rendered with no fill at all, because the reference
+  resolved to no color.
 - CSS font-size keywords such as `large`, `x-small`, `larger` and `smaller`,
   in the `font-size` attribute, in `style` attributes and in the `font`
   shorthand, no longer make `svg2rlg()` fail with `ValueError`. Absolute

@@ -140,6 +140,23 @@ class _GradientDef(_GradientDefBase, total=False):
     fy: float
 
 
+class _PatternDef(TypedDict):
+    """The geometry of a parsed <pattern> definition.
+
+    Geometry values are ``None`` when the attribute is absent, so a pattern
+    referencing another one through ``href`` inherits the referenced
+    pattern's value instead of overriding it with the SVG default.
+    """
+
+    patternUnits: str  # "userSpaceOnUse" or "objectBoundingBox"
+    patternContentUnits: str  # "userSpaceOnUse" or "objectBoundingBox"
+    width: Optional[float]
+    height: Optional[float]
+    x: Optional[float]
+    y: Optional[float]
+    href: Optional[str]
+
+
 def _convert_palette_to_rgba(image: PILImage.Image) -> PILImage.Image:
     """Convert a palette-based image with transparency to RGBA format.
 
@@ -1498,6 +1515,10 @@ class SvgRenderer:
         # Shapes such as <textPath> refer to other nodes by their ID.
         self.shape_converter.definitions = self.definitions
         self.gradient_defs: dict[str, _GradientDef] = {}
+        self.pattern_defs: dict[str, _PatternDef] = {}
+        # Cache of the rendered ReportLab group of each pattern id, so a
+        # pattern referenced by several shapes renders its children only once.
+        self._pattern_tiles: dict[str, Group] = {}
         self.waiting_use_nodes: dict[str, list[tuple[NodeTracker, Optional[Group]]]] = (
             defaultdict(list)
         )
@@ -1612,6 +1633,9 @@ class SvgRenderer:
         elif name in ("linearGradient", "radialGradient"):
             self.renderGradient(node)
             ignored = True
+        elif name == "pattern":
+            self.renderPattern(node)
+            ignored = True
         elif name in self.handled_shapes:
             if name == "image":
                 # We resolve the image target at renderer level because it can point
@@ -1641,10 +1665,12 @@ class SvgRenderer:
                 fill_val = self.attrConverter.findAttr(node, "fill")
                 m = _GRADIENT_URL_RE.fullmatch(fill_val.strip()) if fill_val else None
                 if m:
-                    grad_id = m.group(2)
-                    grad_def = self._resolve_gradient(grad_id)
+                    ref_id = m.group(2)
+                    grad_def = self._resolve_gradient(ref_id)
                     if grad_def is not None:
                         item = self._apply_gradient_fill(item, grad_def)
+                    elif ref_id in self.pattern_defs:
+                        item = self._apply_pattern_fill(item, ref_id)
                 parent.add(item)
         else:
             ignored = True
@@ -1836,6 +1862,189 @@ class SvgRenderer:
         group.add(grad_shape)
         group.add(item)
         return group
+
+    def renderPattern(self, node: NodeTracker) -> None:
+        """Parse a <pattern> element and store its geometry.
+
+        The pattern's children are not rendered here; the tile is built
+        lazily by ``_render_pattern_tile`` the first time a shape references
+        the pattern, and cached for later references.
+        """
+        pattern_id = node.attrib.get("id")
+        if not pattern_id:
+            return
+        # The node itself is skipped during the normal render walk, so register
+        # it explicitly for later lookup (e.g. by <use> and tile rendering).
+        self.definitions[pattern_id] = node
+
+        pattern_units = node.attrib.get("patternUnits", "objectBoundingBox")
+        content_units = node.attrib.get("patternContentUnits", "userSpaceOnUse")
+
+        def _length(attr: str) -> Optional[float]:
+            """Read a pattern geometry attribute, leaving '%' as a fraction."""
+            raw = node.attrib.get(attr, "").strip()
+            if not raw:
+                return None
+            if raw.endswith("%"):
+                try:
+                    return float(raw[:-1]) / 100.0
+                except ValueError:
+                    return None
+            try:
+                return float(raw)
+            except ValueError:
+                return None
+
+        href = node.attrib.get("{http://www.w3.org/1999/xlink}href") or node.attrib.get(
+            "href", ""
+        )
+        href_id = href.lstrip("#") if href.startswith("#") else None
+
+        # None means "not specified": it lets href inheritance fill the value
+        # and _apply_pattern_fill supply the SVG defaults afterwards.
+        self.pattern_defs[pattern_id] = {
+            "patternUnits": pattern_units,
+            "patternContentUnits": content_units,
+            "width": _length("width"),
+            "height": _length("height"),
+            "x": _length("x"),
+            "y": _length("y"),
+            "href": href_id,
+        }
+
+    def _resolve_pattern(self, pattern_id: str) -> Optional[_PatternDef]:
+        """Return a pattern definition, following xlink:href chains."""
+        visited: set[str] = set()
+        result = self.pattern_defs.get(pattern_id)
+        while result is not None:
+            href = result.get("href")
+            if not href or href in visited:
+                break
+            parent = self.pattern_defs.get(href)
+            if parent is None:
+                break
+            visited.add(href)
+            # Only explicitly given attributes (non-None) override the
+            # referenced pattern; the rest is inherited. The merge is by
+            # dynamic key, so build a plain dict and cast back.
+            merged: dict[str, Any] = dict(parent)
+            for key, value in result.items():
+                if key != "href" and value is not None:
+                    merged[key] = value
+            merged["href"] = href
+            result = cast(_PatternDef, merged)
+        return result
+
+    def _pattern_node(self, pattern_id: str) -> Optional[NodeTracker]:
+        """Return the DOM node of the pattern carrying the children to tile."""
+        visited: set[str] = set()
+        current_id = pattern_id
+        while current_id and current_id not in visited:
+            visited.add(current_id)
+            node = self.definitions.get(current_id)
+            if node is None or node_name(node) != "pattern":
+                return None
+            if any(
+                node_name(child) not in (None, "title", "desc", "metadata")
+                for child in node.iter_children()
+            ):
+                return node
+            href = node.attrib.get(
+                "{http://www.w3.org/1999/xlink}href"
+            ) or node.attrib.get("href", "")
+            current_id = href.lstrip("#") if href.startswith("#") else ""
+        return None
+
+    def _render_pattern_tile(self, pattern_id: str) -> Optional[Group]:
+        """Render the children of a pattern into one tile Group.
+
+        The result is cached and returned in its original coordinate space;
+        any objectBoundingBox content scaling is applied by the caller, so the
+        same cached tile is correct for shapes with different bounding boxes.
+        """
+        if pattern_id in self._pattern_tiles:
+            return self._pattern_tiles[pattern_id]
+        node = self._pattern_node(pattern_id)
+        if node is None:
+            return None
+        tile = self.renderG(node)
+        self._pattern_tiles[pattern_id] = tile
+        return tile
+
+    def _apply_pattern_fill(self, item: Any, pattern_id: str) -> Any:
+        """Wrap a shape in a Group that tiles the pattern inside its outline."""
+        pattern_def = self._resolve_pattern(pattern_id)
+        if pattern_def is None:
+            return item
+        clip_shape = _find_clip_shape(item)
+        if clip_shape is None:
+            return item
+        try:
+            bx0, by0, bx1, by1 = clip_shape.getBounds()
+        except Exception:
+            logger.debug("Cannot compute bounding box for pattern", exc_info=True)
+            return item
+        bbox_w, bbox_h = bx1 - bx0, by1 - by0
+        if bbox_w <= 0 or bbox_h <= 0:
+            return item
+
+        if pattern_def["patternUnits"] == "objectBoundingBox":
+            # Geometry attributes are fractions of the shape bounding box.
+            # SVG defaults: x/y = 0, width/height = 100% (i.e. 1.0).
+            width = pattern_def["width"] if pattern_def["width"] is not None else 1.0
+            height = pattern_def["height"] if pattern_def["height"] is not None else 1.0
+            x = pattern_def["x"] or 0.0
+            y = pattern_def["y"] or 0.0
+            tile_w = width * bbox_w
+            tile_h = height * bbox_h
+            origin_x = bx0 + x * bbox_w
+            origin_y = by0 + y * bbox_h
+        else:
+            # In user space, omitted width/height default to 0 and disable
+            # painting of the pattern (SVG 1.1 §13.4.5); x/y default to 0.
+            tile_w = pattern_def["width"] or 0.0
+            tile_h = pattern_def["height"] or 0.0
+            origin_x = pattern_def["x"] or 0.0
+            origin_y = pattern_def["y"] or 0.0
+        if tile_w <= 0 or tile_h <= 0:
+            return item
+
+        tile = self._render_pattern_tile(pattern_id)
+        if tile is None or not tile.contents:
+            return item
+        if pattern_def["patternContentUnits"] == "objectBoundingBox":
+            # Content coordinates are fractions of the tile bounding box:
+            # scale the unscaled, cached tile to this shape's tile size.
+            content = Group()
+            content.scale(tile_w, tile_h)
+            content.add(tile)
+        else:
+            content = tile
+
+        clip_path = self.shape_converter.shapeToPath(clip_shape)
+        if clip_path is None:
+            return item
+
+        wrapper = Group()
+        wrapper.add(ClippingPath(copy_from=clip_path))
+
+        # Tile over the shape bounds; the clip path removes anything outside.
+        # The last intersecting tile starts before (not on) the far edge, so
+        # the upper index is ceil(span/tile) - 1 in both aligned and
+        # non-aligned cases.
+        col_start = math.floor((bx0 - origin_x) / tile_w)
+        col_end = math.ceil((bx1 - origin_x) / tile_w) - 1
+        row_start = math.floor((by0 - origin_y) / tile_h)
+        row_end = math.ceil((by1 - origin_y) / tile_h) - 1
+        for col in range(col_start, col_end + 1):
+            for row in range(row_start, row_end + 1):
+                tile_group = Group()
+                tile_group.translate(origin_x + col * tile_w, origin_y + row * tile_h)
+                tile_group.add(content)
+                wrapper.add(tile_group)
+        # Keep the original shape so its stroke (and any other style) is kept.
+        wrapper.add(item)
+        return wrapper
 
     def get_display(self, node: NodeTracker) -> str:
         """Return the effective 'display' value of a node.
