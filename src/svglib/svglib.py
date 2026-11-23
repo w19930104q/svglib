@@ -68,10 +68,26 @@ from reportlab.pdfgen.canvas import FILL_EVEN_ODD, FILL_NON_ZERO
 from reportlab.pdfgen.pdfimages import PDFImage
 
 try:
-    from reportlab.graphics.transform import mmult
+    from reportlab.graphics.transform import (
+        mmult,
+        nullTransform,
+        rotate,
+        scale,
+        skewX,
+        skewY,
+        translate,
+    )
 except ImportError:
     # Before Reportlab 3.5.61
-    from reportlab.graphics.shapes import mmult
+    from reportlab.graphics.shapes import (
+        mmult,
+        nullTransform,
+        rotate,
+        scale,
+        skewX,
+        skewY,
+        translate,
+    )
 
 import cssselect2
 import tinycss2
@@ -138,6 +154,12 @@ class _GradientDef(_GradientDefBase, total=False):
     r: float
     fx: float
     fy: float
+    # Names of the geometry attributes given as percentages (stored as
+    # fractions above); resolved against the bounding box or the viewport
+    # when the gradient is applied.
+    pct_attrs: list[str]
+    # The gradientTransform as a ReportLab affine matrix (a, b, c, d, e, f).
+    gradientTransform: tuple[float, ...]
 
 
 def _convert_palette_to_rgba(image: PILImage.Image) -> PILImage.Image:
@@ -1379,6 +1401,48 @@ def _default_language() -> str:
     return ""
 
 
+def _transform_list_to_matrix(
+    ops: list[tuple[str, Union[float, tuple[float, ...]]]],
+) -> tuple[float, ...]:
+    """Compose parsed SVG transform operations into a single affine matrix.
+
+    Args:
+        ops: The operations returned by ``AttributeConverter.convertTransform``.
+
+    Returns:
+        A ReportLab affine matrix ``(a, b, c, d, e, f)`` applying the
+        operations in document order.
+    """
+    matrix = nullTransform()
+    for op, values in ops:
+        if op == "matrix" and isinstance(values, tuple) and len(values) == 6:
+            m: tuple[float, ...] = values
+        elif op == "translate":
+            if not isinstance(values, tuple):
+                # Per the SVG spec, a missing <ty> defaults to zero.
+                values = (values, 0)
+            m = translate(*values)
+        elif op == "scale":
+            if not isinstance(values, tuple):
+                values = (values, values)
+            m = scale(*values)
+        elif op == "rotate":
+            if isinstance(values, tuple) and len(values) == 3:
+                angle, cx, cy = values
+                m = mmult(translate(cx, cy), mmult(rotate(angle), translate(-cx, -cy)))
+            else:
+                m = rotate(values if not isinstance(values, tuple) else values[0])
+        elif op == "skewX" and not isinstance(values, tuple):
+            m = skewX(values)
+        elif op == "skewY" and not isinstance(values, tuple):
+            m = skewY(values)
+        else:
+            logger.debug("Ignoring transform operation: %s %s", op, values)
+            continue
+        matrix = mmult(matrix, m)
+    return matrix
+
+
 class LinearGradientShape(DirectDraw):
     """Fills a clipped region with a linear gradient via PDF shading."""
 
@@ -1392,14 +1456,22 @@ class LinearGradientShape(DirectDraw):
         rl_colors: list[colors.Color],
         positions: list[float],
         extend: bool = True,
+        transform: Optional[tuple[float, ...]] = None,
     ) -> None:
-        """Store the clip shape, gradient axis, colours and stop positions."""
+        """Store the clip shape, gradient axis, colours and stop positions.
+
+        The axis endpoints are given in the gradient coordinate system;
+        ``transform`` (a ReportLab affine matrix, e.g. the bounding-box
+        mapping combined with any gradientTransform) is applied to the
+        canvas before the shading is painted.
+        """
         self._clip_shape = clip_shape
         self._x0, self._y0 = x0, y0
         self._x1, self._y1 = x1, y1
         self._rl_colors = rl_colors
         self._positions = positions
         self._extend = extend
+        self._transform = transform
 
     def drawDirectly(self, renderer: Any) -> None:
         """Paint the linear gradient into the clipped region on the PDF canvas."""
@@ -1407,6 +1479,8 @@ class LinearGradientShape(DirectDraw):
         canvas.saveState()
         if pdfPath := _shape_to_pdf_path(canvas, self._clip_shape):
             canvas.clipPath(pdfPath, fill=1, stroke=0)
+            if self._transform is not None:
+                canvas.transform(*self._transform)
             canvas.linearGradient(
                 self._x0,
                 self._y0,
@@ -1416,7 +1490,7 @@ class LinearGradientShape(DirectDraw):
                 self._positions,
                 self._extend,
             )
-            canvas.restoreState()
+        canvas.restoreState()
 
     def getBounds(self) -> tuple[float, float, float, float]:
         """Return the bounds of the clipped region this gradient fills."""
@@ -1435,13 +1509,21 @@ class RadialGradientShape(DirectDraw):
         rl_colors: list[colors.Color],
         positions: list[float],
         extend: bool = True,
+        transform: Optional[tuple[float, ...]] = None,
     ) -> None:
-        """Store the clip shape, centre, radius, colours and stop positions."""
+        """Store the clip shape, centre, radius, colours and stop positions.
+
+        The centre and radius are given in the gradient coordinate system;
+        ``transform`` (a ReportLab affine matrix, e.g. the bounding-box
+        mapping combined with any gradientTransform) is applied to the
+        canvas before the shading is painted.
+        """
         self._clip_shape = clip_shape
         self._cx, self._cy, self._r = cx, cy, r
         self._rl_colors = rl_colors
         self._positions = positions
         self._extend = extend
+        self._transform = transform
 
     def drawDirectly(self, renderer: Any) -> None:
         """Paint the radial gradient into the clipped region on the PDF canvas."""
@@ -1449,6 +1531,8 @@ class RadialGradientShape(DirectDraw):
         canvas.saveState()
         if pdfPath := _shape_to_pdf_path(canvas, self._clip_shape):
             canvas.clipPath(pdfPath, fill=1, stroke=0)
+            if self._transform is not None:
+                canvas.transform(*self._transform)
             canvas.radialGradient(
                 self._cx,
                 self._cy,
@@ -1457,7 +1541,7 @@ class RadialGradientShape(DirectDraw):
                 self._positions,
                 self._extend,
             )
-            canvas.restoreState()
+        canvas.restoreState()
 
     def getBounds(self) -> tuple[float, float, float, float]:
         """Return the bounds of the clipped region this gradient fills."""
@@ -1676,18 +1760,40 @@ class SvgRenderer:
             return
         grad_type = node_name(node)  # "linearGradient" or "radialGradient"
 
-        def _float_attr(attr: str, default: float) -> float:
-            """Return a gradient geometry attribute as a float, resolving percent."""
-            raw = node.attrib.get(attr, "").strip()
+        pct_attrs: list[str] = []
+
+        def _float_attr(attr: str) -> Optional[float]:
+            """Return a present gradient geometry attribute as a float.
+
+            Percentages are returned as fractions and the attribute name is
+            recorded in pct_attrs, so the value can later be resolved against
+            the bounding box or the viewport, depending on gradientUnits.
+            Attributes that are absent or invalid return None, so gradient
+            defaults and xlink:href inheritance can apply at use time.
+            """
+            raw = node.attrib.get(attr)
+            if raw is None:
+                return None
+            raw = raw.strip()
             if raw.endswith("%"):
                 try:
-                    return float(raw[:-1]) / 100.0
+                    value = float(raw[:-1]) / 100.0
                 except ValueError:
-                    return default
+                    return None
+                pct_attrs.append(attr)
+                return value
             try:
-                return float(raw) if raw else default
+                return float(raw)
             except ValueError:
-                return default
+                pass
+            # Lengths with units ("10px", "2cm", ...) resolve to user units.
+            try:
+                length = self.attrConverter.convertLength(raw)
+            except ValueError:
+                return None
+            if isinstance(length, list):
+                return None
+            return float(length)
 
         href = node.attrib.get("{http://www.w3.org/1999/xlink}href") or node.attrib.get(
             "href", ""
@@ -1748,16 +1854,23 @@ class SvgRenderer:
         }
 
         if grad_type == "linearGradient":
-            grad_def["x1"] = _float_attr("x1", 0.0)
-            grad_def["y1"] = _float_attr("y1", 0.0)
-            grad_def["x2"] = _float_attr("x2", 1.0)
-            grad_def["y2"] = _float_attr("y2", 0.0)
+            for attr in ("x1", "y1", "x2", "y2"):
+                value = _float_attr(attr)
+                if value is not None:
+                    grad_def[attr] = value
         else:
-            grad_def["cx"] = _float_attr("cx", 0.5)
-            grad_def["cy"] = _float_attr("cy", 0.5)
-            grad_def["r"] = _float_attr("r", 0.5)
-            grad_def["fx"] = _float_attr("fx", grad_def["cx"])
-            grad_def["fy"] = _float_attr("fy", grad_def["cy"])
+            for attr in ("cx", "cy", "r", "fx", "fy"):
+                value = _float_attr(attr)
+                if value is not None:
+                    grad_def[attr] = value  # type: ignore[literal-required]
+        if pct_attrs:
+            grad_def["pct_attrs"] = pct_attrs
+
+        gt_attr = node.attrib.get("gradientTransform", "").strip()
+        if gt_attr:
+            gt_ops = self.attrConverter.convertTransform(gt_attr)
+            if gt_ops:
+                grad_def["gradientTransform"] = _transform_list_to_matrix(gt_ops)
 
         self.gradient_defs[grad_id] = grad_def
 
@@ -1797,6 +1910,9 @@ class SvgRenderer:
         rl_colors = [s[1] for s in stops]
         extend = grad_def.get("spreadMethod", "pad") == "pad"
         grad_units = grad_def.get("gradientUnits", "objectBoundingBox")
+        pct_attrs = grad_def.get("pct_attrs", ())
+        grad_transform = grad_def.get("gradientTransform")
+        values = cast(dict[str, Any], grad_def)
 
         if grad_units == "objectBoundingBox":
             try:
@@ -1804,32 +1920,51 @@ class SvgRenderer:
             except Exception:
                 logger.debug("Cannot compute bounding box for gradient", exc_info=True)
                 return item
-            bbox_w = bx1 - bx0
-            bbox_h = by1 - by0
+            # Gradient coordinates are fractions of the bounding box. Fold the
+            # mapping of the unit square onto the box — and the optional
+            # gradientTransform, which the SVG spec applies in the gradient's
+            # own coordinate system — into the transformation used when
+            # painting the shading.
+            transform: Optional[tuple[float, ...]] = mmult(
+                translate(bx0, by0), scale(bx1 - bx0, by1 - by0)
+            )
+            if grad_transform is not None:
+                transform = mmult(transform, grad_transform)
+            x_basis = y_basis = r_basis = 1.0
         else:
-            bx0 = by0 = bbox_w = bbox_h = 0.0  # unused for userSpaceOnUse
+            # userSpaceOnUse: percentages resolve against the viewport — x
+            # values against its width, y values against its height and other
+            # lengths against the normalized diagonal (SVG 1.1 §7.10).
+            box = self.attrConverter.main_box
+            x_basis = box.width if box else 0.0
+            y_basis = box.height if box else 0.0
+            r_basis = math.hypot(x_basis, y_basis) / math.sqrt(2.0)
+            transform = grad_transform
+
+        def geo(attr: str, default: float, basis: float) -> float:
+            """Return a gradient geometry value, resolving percentages.
+
+            Plain numbers are used as is; percentages (stored as fractions)
+            and the spec's percentage defaults are resolved against basis.
+            """
+            if attr in values and attr not in pct_attrs:
+                return float(values[attr])
+            return float(values.get(attr, default)) * basis
 
         if grad_def["type"] == "linear":
-            x1, y1 = grad_def.get("x1", 0.0), grad_def.get("y1", 0.0)
-            x2, y2 = grad_def.get("x2", 1.0), grad_def.get("y2", 0.0)
-            if grad_units == "objectBoundingBox":
-                x1 = bx0 + x1 * bbox_w
-                y1 = by0 + y1 * bbox_h
-                x2 = bx0 + x2 * bbox_w
-                y2 = by0 + y2 * bbox_h
+            x1 = geo("x1", 0.0, x_basis)
+            y1 = geo("y1", 0.0, y_basis)
+            x2 = geo("x2", 1.0, x_basis)
+            y2 = geo("y2", 0.0, y_basis)
             grad_shape: DirectDraw = LinearGradientShape(
-                clip_shape, x1, y1, x2, y2, rl_colors, positions, extend
+                clip_shape, x1, y1, x2, y2, rl_colors, positions, extend, transform
             )
         else:
-            cx = grad_def.get("cx", 0.5)
-            cy = grad_def.get("cy", 0.5)
-            r = grad_def.get("r", 0.5)
-            if grad_units == "objectBoundingBox":
-                cx = bx0 + cx * bbox_w
-                cy = by0 + cy * bbox_h
-                r = r * (bbox_w + bbox_h) / 2.0
+            cx = geo("cx", 0.5, x_basis)
+            cy = geo("cy", 0.5, y_basis)
+            r = geo("r", 0.5, r_basis)
             grad_shape = RadialGradientShape(
-                clip_shape, cx, cy, r, rl_colors, positions, extend
+                clip_shape, cx, cy, r, rl_colors, positions, extend, transform
             )
 
         group = Group()

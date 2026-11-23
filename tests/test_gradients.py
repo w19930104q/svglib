@@ -5,9 +5,10 @@ from reportlab.graphics.shapes import (
     Group,
     Rect,
 )
+from reportlab.graphics.transform import transformPoint
 from reportlab.lib import colors
 
-from svglib.svglib import LinearGradientShape
+from svglib.svglib import LinearGradientShape, RadialGradientShape
 from tests.utils import (
     drawing_from_svg,
 )
@@ -28,6 +29,18 @@ class TestGradients:
             for item in shape.contents:
                 result.extend(TestGradients._find_groups(item))
         return result
+
+    @staticmethod
+    def _find_gradient_shape(shape, cls):
+        """Recursively find the first gradient shape of type cls in a drawing."""
+        if isinstance(shape, cls):
+            return shape
+        if hasattr(shape, "contents"):
+            for item in shape.contents:
+                found = TestGradients._find_gradient_shape(item, cls)
+                if found is not None:
+                    return found
+        return None
 
     def test_linear_gradient_rect(self):
         """A rect with a linearGradient fill must produce a Group (not a bare Rect)."""
@@ -150,6 +163,137 @@ class TestGradients:
         )
         groups = self._find_groups(drawing)
         assert len(groups) > 1
+
+    def test_gradient_transform_parsed(self):
+        """A gradientTransform must be parsed into a matrix on the gradient def."""
+        from io import BytesIO
+
+        from svglib.svglib import SvgRenderer, load_svg_file
+
+        svg_content = b"""<?xml version="1.0"?>
+            <svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+                <defs>
+                    <linearGradient id="grot" gradientTransform="rotate(90)">
+                        <stop offset="0" stop-color="red"/>
+                        <stop offset="1" stop-color="blue"/>
+                    </linearGradient>
+                </defs>
+            </svg>"""
+        root = load_svg_file(BytesIO(svg_content))
+        renderer = SvgRenderer("")
+        renderer.render(root)
+        grad = renderer.gradient_defs.get("grot")
+        assert grad is not None
+        assert "gradientTransform" in grad
+        # rotate(90) maps the point (1, 0) to (0, 1).
+        assert transformPoint(grad["gradientTransform"], (1, 0)) == pytest.approx(
+            (0, 1)
+        )
+
+    def test_linear_gradient_transform_applied(self):
+        """gradientTransform=rotate(90) must turn a horizontal gradient vertical."""
+        drawing = drawing_from_svg(
+            """
+            <?xml version="1.0"?>
+            <svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+                <defs>
+                    <linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="0%"
+                                    gradientTransform="rotate(90)">
+                        <stop offset="0" stop-color="red"/>
+                        <stop offset="1" stop-color="blue"/>
+                    </linearGradient>
+                </defs>
+                <rect x="10" y="10" width="80" height="80" fill="url(#lg)"/>
+            </svg>
+        """
+        )
+        grad = self._find_gradient_shape(drawing, LinearGradientShape)
+        assert grad is not None
+        assert grad._transform is not None
+        # The axis is kept in bounding-box fractions; the transform rotates it
+        # and maps it onto the rect's bounding box (10, 10, 90, 90), so the
+        # gradient runs from the top-left to the bottom-left corner.
+        assert transformPoint(grad._transform, (grad._x0, grad._y0)) == pytest.approx(
+            (10, 10)
+        )
+        assert transformPoint(grad._transform, (grad._x1, grad._y1)) == pytest.approx(
+            (10, 90)
+        )
+
+    def test_radial_gradient_transform_applied(self):
+        """A gradientTransform must also apply to radial gradients."""
+        drawing = drawing_from_svg(
+            """
+            <?xml version="1.0"?>
+            <svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+                <defs>
+                    <radialGradient id="rg" cx="50%" cy="50%" r="50%"
+                                    gradientTransform="translate(0.25 0)">
+                        <stop offset="0" stop-color="red"/>
+                        <stop offset="1" stop-color="blue"/>
+                    </radialGradient>
+                </defs>
+                <rect x="0" y="0" width="100" height="100" fill="url(#rg)"/>
+            </svg>
+        """
+        )
+        grad = self._find_gradient_shape(drawing, RadialGradientShape)
+        assert grad is not None
+        assert grad._transform is not None
+        # The centre (0.5, 0.5) shifted by (0.25, 0) lands at 75% of the width.
+        assert transformPoint(grad._transform, (grad._cx, grad._cy)) == pytest.approx(
+            (75, 50)
+        )
+
+    def test_userSpaceOnUse_percentages(self):
+        """Percentages in userSpaceOnUse gradients resolve against the viewport."""
+        drawing = drawing_from_svg(
+            """
+            <?xml version="1.0"?>
+            <svg xmlns="http://www.w3.org/2000/svg" width="200" height="200">
+                <defs>
+                    <radialGradient id="rg" cx="50%" cy="50%" r="50%"
+                                    gradientUnits="userSpaceOnUse">
+                        <stop offset="0" stop-color="red"/>
+                        <stop offset="1" stop-color="blue"/>
+                    </radialGradient>
+                </defs>
+                <rect x="0" y="0" width="200" height="200" fill="url(#rg)"/>
+            </svg>
+        """
+        )
+        grad = self._find_gradient_shape(drawing, RadialGradientShape)
+        assert grad is not None
+        # 50% of the 200x200 viewport, not 0.5 user units.
+        assert grad._cx == pytest.approx(100)
+        assert grad._cy == pytest.approx(100)
+        # Lengths resolve against the normalized diagonal of the viewport,
+        # sqrt(200**2 + 200**2) / sqrt(2) == 200.
+        assert grad._r == pytest.approx(100)
+
+    def test_userSpaceOnUse_linear_percentages(self):
+        """A userSpaceOnUse linear gradient with % coordinates spans the viewport."""
+        drawing = drawing_from_svg(
+            """
+            <?xml version="1.0"?>
+            <svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">
+                <defs>
+                    <linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="0%"
+                                    gradientUnits="userSpaceOnUse">
+                        <stop offset="0" stop-color="red"/>
+                        <stop offset="1" stop-color="blue"/>
+                    </linearGradient>
+                </defs>
+                <rect x="0" y="0" width="200" height="100" fill="url(#lg)"/>
+            </svg>
+        """
+        )
+        grad = self._find_gradient_shape(drawing, LinearGradientShape)
+        assert grad is not None
+        assert (grad._x0, grad._y0) == (0, 0)
+        # x2="100%" resolves against the viewport width.
+        assert grad._x1 == pytest.approx(200)
+        assert grad._y1 == pytest.approx(0)
 
     def test_gradient_stop_opacity_in_style(self):
         """Stop opacity specified in a style attribute must be respected."""

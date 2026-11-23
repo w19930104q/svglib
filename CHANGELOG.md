@@ -11,6 +11,15 @@
 
 ### Fixed
 
+- The `gradientTransform` of a `<linearGradient>` or `<radialGradient>` is now
+  applied to the gradient coordinate system instead of being ignored, so e.g.
+  `gradientTransform="rotate(90)"` turns a horizontal gradient vertical.
+- Percentages in a `gradientUnits="userSpaceOnUse"` gradient are now resolved
+  against the viewport (x against its width, y against its height, lengths
+  against the normalized diagonal) instead of being read as tiny fractions of
+  a user unit, which painted the whole shape with the last stop color.
+  Gradient geometry attributes that are not set are now inherited through
+  `xlink:href` instead of falling back to the defaults.
 - CSS font-size keywords such as `large`, `x-small`, `larger` and `smaller`,
   in the `font-size` attribute, in `style` attributes and in the `font`
   shorthand, no longer make `svg2rlg()` fail with `ValueError`. Absolute

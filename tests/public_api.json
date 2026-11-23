@@ -230,7 +230,7 @@
     "drawDirectly",
     "getBounds"
    ],
-   "what": "class(POSITIONAL_OR_KEYWORD:clip_shape, POSITIONAL_OR_KEYWORD:x0, POSITIONAL_OR_KEYWORD:y0, POSITIONAL_OR_KEYWORD:x1, POSITIONAL_OR_KEYWORD:y1, POSITIONAL_OR_KEYWORD:rl_colors, POSITIONAL_OR_KEYWORD:positions, POSITIONAL_OR_KEYWORD:extend)"
+   "what": "class(POSITIONAL_OR_KEYWORD:clip_shape, POSITIONAL_OR_KEYWORD:x0, POSITIONAL_OR_KEYWORD:y0, POSITIONAL_OR_KEYWORD:x1, POSITIONAL_OR_KEYWORD:y1, POSITIONAL_OR_KEYWORD:rl_colors, POSITIONAL_OR_KEYWORD:positions, POSITIONAL_OR_KEYWORD:extend, POSITIONAL_OR_KEYWORD:transform)"
   },
   "MAX_USE_CLONED_ELEMENTS": {
    "what": "constant 20000"
@@ -292,7 +292,7 @@
     "drawDirectly",
     "getBounds"
    ],
-   "what": "class(POSITIONAL_OR_KEYWORD:clip_shape, POSITIONAL_OR_KEYWORD:cx, POSITIONAL_OR_KEYWORD:cy, POSITIONAL_OR_KEYWORD:r, POSITIONAL_OR_KEYWORD:rl_colors, POSITIONAL_OR_KEYWORD:positions, POSITIONAL_OR_KEYWORD:extend)"
+   "what": "class(POSITIONAL_OR_KEYWORD:clip_shape, POSITIONAL_OR_KEYWORD:cx, POSITIONAL_OR_KEYWORD:cy, POSITIONAL_OR_KEYWORD:r, POSITIONAL_OR_KEYWORD:rl_colors, POSITIONAL_OR_KEYWORD:positions, POSITIONAL_OR_KEYWORD:extend, POSITIONAL_OR_KEYWORD:transform)"
   },
   "Rect": {
    "what": "external"
@@ -529,6 +529,9 @@
   "_shape_to_pdf_path": {
    "what": "callable(POSITIONAL_OR_KEYWORD:canvas, POSITIONAL_OR_KEYWORD:shape)"
   },
+  "_transform_list_to_matrix": {
+   "what": "callable(POSITIONAL_OR_KEYWORD:ops)"
+  },
   "_without_important": {
    "what": "callable(POSITIONAL_OR_KEYWORD:value)"
   },
@@ -583,11 +586,26 @@
   "nudge_points": {
    "what": "callable(POSITIONAL_OR_KEYWORD:points)"
   },
+  "nullTransform": {
+   "what": "external"
+  },
   "place_glyphs_on_path": {
    "what": "callable(POSITIONAL_OR_KEYWORD:advances, POSITIONAL_OR_KEYWORD:sampler, POSITIONAL_OR_KEYWORD:start)"
   },
   "register_font": {
    "what": "callable(POSITIONAL_OR_KEYWORD:font_name, POSITIONAL_OR_KEYWORD:font_path, POSITIONAL_OR_KEYWORD:weight, POSITIONAL_OR_KEYWORD:style, POSITIONAL_OR_KEYWORD:rlgFontName)"
+  },
+  "rotate": {
+   "what": "external"
+  },
+  "scale": {
+   "what": "external"
+  },
+  "skewX": {
+   "what": "external"
+  },
+  "skewY": {
+   "what": "external"
   },
   "split_whitespace": {
    "what": "external"
@@ -599,6 +617,9 @@
    "what": "callable(POSITIONAL_OR_KEYWORD:path, POSITIONAL_OR_KEYWORD:resolve_entities, VAR_KEYWORD:kwargs)"
   },
   "toLength": {
+   "what": "external"
+  },
+  "translate": {
    "what": "external"
   }
  },
