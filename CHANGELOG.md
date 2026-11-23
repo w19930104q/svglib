@@ -92,6 +92,12 @@
 - The CSS `font` shorthand is now expanded into `font-style`, `font-weight`,
   `font-size` and `font-family`, in `style` attributes and in `<style>` rules.
   Invalid shorthands are ignored (#343, #526, thanks to @Pharex38).
+- `stop-opacity` on the stops of a `linearGradient` or `radialGradient` is now
+  applied in the PDF output. ReportLab's gradient API only writes the stop
+  RGB channels and silently drops alpha, so translucent stops rendered fully
+  opaque; svglib now emits the alpha coverage as a `DeviceGray` shading used
+  by a luminosity soft mask. Opaque gradients and plain solid fills keep
+  their previous, simpler output.
 
 ### Removed
 

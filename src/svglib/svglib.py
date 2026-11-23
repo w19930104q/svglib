@@ -63,6 +63,7 @@ from reportlab.graphics.shapes import (
 )
 from reportlab.lib import colors
 from reportlab.lib.units import toLength
+from reportlab.pdfbase import pdfdoc
 from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen.canvas import FILL_EVEN_ODD, FILL_NON_ZERO
 from reportlab.pdfgen.pdfimages import PDFImage
@@ -1379,6 +1380,242 @@ def _default_language() -> str:
     return ""
 
 
+def _gradient_has_alpha(rl_colors: list[Any]) -> bool:
+    """Whether any gradient stop carries a non-opaque alpha value."""
+    return any(getattr(c, "alpha", 1.0) < 1.0 for c in rl_colors)
+
+
+def _pdf_gradient_function(
+    color_stops: list[tuple[float, ...]], positions: list[float]
+) -> Any:
+    """Build a PDF type 2/3 interpolation function for the given stop colors.
+
+    ``color_stops`` are tuples of component values (3 for RGB, 1 for gray);
+    this mirrors ReportLab's private ``_buildColorFunction`` helper.
+    """
+    if len(color_stops) == 1:
+        return pdfdoc.PDFExponentialFunction(N=1, C0=color_stops[0], C1=color_stops[0])
+    if len(color_stops) == 2 and (
+        not positions or (positions[0] == 0 and positions[1] == 1)
+    ):
+        return pdfdoc.PDFExponentialFunction(
+            N=1, C0=color_stops[0], C1=color_stops[1]
+        )
+    if not positions:
+        nc = len(color_stops)
+        positions = [float(i) / (nc - 1) for i in range(nc)]
+    else:
+        poscolors = sorted(zip(positions, color_stops), key=lambda pc: pc[0])
+        if poscolors[0][0] != 0:
+            poscolors.insert(0, (0.0, poscolors[0][1]))
+        if poscolors[-1][0] != 1:
+            poscolors.append((1.0, poscolors[-1][1]))
+        positions = [p for p, _ in poscolors]
+        color_stops = [c for _, c in poscolors]
+    functions = []
+    previous = color_stops[0]
+    for color in color_stops[1:]:
+        functions.append(pdfdoc.PDFExponentialFunction(N=1, C0=previous, C1=color))
+        previous = color
+    encode: list[float] = []
+    for _ in functions:
+        encode.extend((0.0, 1.0))
+    return pdfdoc.PDFStitchingFunction(
+        functions, positions[1:-1], encode, Domain=pdfdoc.PDFArray([0.0, 1.0])
+    )
+
+
+def _inverse_affine(matrix: tuple[float, ...]) -> tuple[float, ...]:
+    """Invert a 2D affine transform given as ``(a, b, c, d, e, f)``."""
+    a, b, c, d, e, f = matrix
+    det = a * d - b * c
+    if det == 0:
+        return (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    return (
+        d / det,
+        -b / det,
+        -c / det,
+        a / det,
+        (c * f - d * e) / det,
+        (b * e - a * f) / det,
+    )
+
+
+def _shading_form(
+    canvas: Any,
+    shading: Any,
+    bbox: tuple[float, float, float, float],
+    form_matrix: tuple[float, ...],
+    clip_code: Optional[str] = None,
+    even_odd_clip: bool = True,
+) -> str:
+    """Wrap a PDF shading in a form XObject and return the form's name.
+
+    The form's own ``Matrix`` carries the user-space -> device transform so
+    the page CTM can stay at the identity while the soft mask is evaluated.
+    When ``clip_code`` is given (raw PDF path operators) it is emitted inside
+    the form stream together with a clip command before the shading, keeping
+    the clipping in the form's own graphics state rather than on the page.
+    ``even_odd_clip`` selects ``W*`` (even-odd) versus ``W`` (non-zero),
+    matching ``canvas.clipPath``'s fill-mode handling.
+    """
+    doc = canvas._doc
+    shading_name = doc.addShading(shading)
+    stream_lines: list[str] = []
+    if clip_code:
+        # getCode() may be prefixed by the "n" no-paint marker left from a
+        # previous operation; clip needs a live path, so strip it and add our
+        # own clip operator + n (end path without painting).
+        path_ops = clip_code.strip()
+        if path_ops.startswith("n "):
+            path_ops = path_ops[2:]
+        clip_op = "W* n" if even_odd_clip else "W n"
+        stream_lines.append(path_ops)
+        stream_lines.append(clip_op)
+    stream_lines.append(f"/{shading_name} sh")
+    form = pdfdoc.PDFFormXObject(*bbox)
+    form.Matrix = pdfdoc.PDFArray(form_matrix)
+    form.setStreamList(stream_lines)
+    form.Resources = pdfdoc.PDFResourceDictionary()
+    form.Resources.basicProcs()
+    form.Resources.Shading = pdfdoc.PDFDictionary(
+        {shading_name: pdfdoc.PDFObjectReference(shading.__InternalName__)}
+    )
+    name = f"svglibGrad{doc.objectcounter}"
+    doc.addForm(name, form)
+    return name
+
+
+def _register_smask_state(canvas: Any, mask_form_name: str) -> str:
+    """Register an ExtGState with a luminosity SMask and return its name.
+
+    ReportLab's ExtGState helper only knows about CA/ca/blend mode, so the
+    SMask entry is inserted directly into its name->dict cache (``_c``). The
+    cache value is emitted verbatim inside ``<< /SMask ... >>``, hence the
+    inline mask dictionary; the canvas then propagates it through the normal
+    page-resource machinery.
+    """
+    doc = canvas._doc
+    internal_mask_name = doc.getXObjectName(mask_form_name)
+    mask_dict = pdfdoc.PDFDictionary(
+        {
+            "Type": pdfdoc.PDFName("Mask"),
+            "S": pdfdoc.PDFName("Luminosity"),
+            "G": pdfdoc.PDFObjectReference(internal_mask_name),
+        }
+    )
+    state_name = f"gRLsvglibSMask{len(canvas._extgstate._c)}"
+    canvas._extgstate._c[("SMask", mask_dict)] = state_name
+    return state_name
+
+
+def _draw_gradient(
+    canvas: Any,
+    pdf_path: Any,
+    kind: str,
+    geometry: tuple[float, ...],
+    rl_colors: list[Any],
+    positions: list[float],
+    extend: bool,
+    clip_bounds: tuple[float, float, float, float],
+) -> None:
+    """Paint a shape-clipped gradient, honoring per-stop opacity.
+
+    ReportLab's ``canvas.linearGradient``/``radialGradient`` only write the
+    RGB channels of the stops (their color normalizer drops ``alpha``), so a
+    gradient whose stops use ``stop-opacity`` would otherwise be rendered
+    fully opaque.
+
+    PDF shadings carry no per-stop alpha channel; transparency is expressed
+    with a luminosity soft mask (an ``/SMask`` graphics state). When at least
+    one stop is translucent we emit two shadings in form XObjects: the color
+    gradient in ``DeviceRGB`` and an alpha gradient in ``DeviceGray``, the
+    latter becoming the soft mask the color form is painted through. Fully
+    opaque gradients use the plain canvas shading API.
+
+    Two portability constraints shape the translucent output:
+
+    * A clip path left active on the page graphics state is applied while the
+      viewer evaluates the soft mask and zeroes coverage outside it, so the
+      clip is written inside each form's own stream instead.
+    * Several viewers (notably PDFium) mis-evaluate a soft mask when the page
+      current transformation matrix is not the identity. The active CTM is
+      therefore neutralised with an inverse ``cm`` and the user-space ->
+      device transform is moved into each form's own ``Matrix``, leaving the
+      page CTM at identity while the mask compositing runs.
+    """
+    extend_str = "[true true]" if extend else "[false false]"
+    rgb_stops = [tuple(c.rgb()) for c in rl_colors]
+    color_function = _pdf_gradient_function(rgb_stops, positions)
+    if kind == "linear":
+        x0, y0, x1, y1 = geometry
+        color_shading = pdfdoc.PDFAxialShading(
+            x0, y0, x1, y1,
+            Function=color_function,
+            ColorSpace="DeviceRGB",
+            Extend=extend_str,
+        )
+    else:
+        cx, cy, r = geometry
+        color_shading = pdfdoc.PDFRadialShading(
+            cx, cy, 0.0, cx, cy, r,
+            Function=color_function,
+            ColorSpace="DeviceRGB",
+            Extend=extend_str,
+        )
+
+    if not _gradient_has_alpha(rl_colors):
+        # Opaque fast path: same output as canvas.linearGradient().
+        canvas.clipPath(pdf_path, fill=1, stroke=0)
+        canvas.shade(color_shading)
+        return
+
+    bbox = clip_bounds
+    clip_code = pdf_path.getCode()
+    # Mirror canvas.clipPath: use the path's own fill mode if present,
+    # otherwise the canvas default; FILL_EVEN_ODD (0) selects the W* operator.
+    fill_mode = getattr(pdf_path, "_fillMode", canvas._fillMode)
+    even_odd_clip = fill_mode == FILL_EVEN_ODD
+
+    # White = fully opaque, black = fully transparent in a luminosity mask.
+    alpha_stops: list[tuple[float, ...]] = [
+        (float(getattr(c, "alpha", 1.0)),) for c in rl_colors
+    ]
+    alpha_function = _pdf_gradient_function(alpha_stops, positions)
+    if kind == "linear":
+        alpha_shading = pdfdoc.PDFAxialShading(
+            x0, y0, x1, y1,
+            Function=alpha_function,
+            ColorSpace="DeviceGray",
+            Extend=extend_str,
+        )
+    else:
+        alpha_shading = pdfdoc.PDFRadialShading(
+            cx, cy, 0.0, cx, cy, r,
+            Function=alpha_function,
+            ColorSpace="DeviceGray",
+            Extend=extend_str,
+        )
+
+    # Move the active transform into the form matrices and reset the page
+    # CTM to identity for the duration of the masked paint. transform() emits
+    # the inverse cm and keeps the canvas's bookkeeping matrix consistent;
+    # the surrounding saveState()/restoreState() in the caller unwraps it.
+    current_ctm = tuple(canvas._currentMatrix)
+    inverse_ctm = _inverse_affine(current_ctm)
+    mask_name = _shading_form(
+        canvas, alpha_shading, bbox, current_ctm, clip_code, even_odd_clip
+    )
+    state_name = _register_smask_state(canvas, mask_name)
+    color_name = _shading_form(
+        canvas, color_shading, bbox, current_ctm, clip_code, even_odd_clip
+    )
+
+    canvas.transform(*inverse_ctm)
+    canvas._code.append(f"/{state_name} gs")
+    canvas.doForm(color_name)
+
+
 class LinearGradientShape(DirectDraw):
     """Fills a clipped region with a linear gradient via PDF shading."""
 
@@ -1406,15 +1643,15 @@ class LinearGradientShape(DirectDraw):
         canvas = renderer._canvas
         canvas.saveState()
         if pdfPath := _shape_to_pdf_path(canvas, self._clip_shape):
-            canvas.clipPath(pdfPath, fill=1, stroke=0)
-            canvas.linearGradient(
-                self._x0,
-                self._y0,
-                self._x1,
-                self._y1,
+            _draw_gradient(
+                canvas,
+                pdfPath,
+                "linear",
+                (self._x0, self._y0, self._x1, self._y1),
                 self._rl_colors,
                 self._positions,
                 self._extend,
+                self._clip_shape.getBounds(),
             )
             canvas.restoreState()
 
@@ -1448,14 +1685,15 @@ class RadialGradientShape(DirectDraw):
         canvas = renderer._canvas
         canvas.saveState()
         if pdfPath := _shape_to_pdf_path(canvas, self._clip_shape):
-            canvas.clipPath(pdfPath, fill=1, stroke=0)
-            canvas.radialGradient(
-                self._cx,
-                self._cy,
-                self._r,
+            _draw_gradient(
+                canvas,
+                pdfPath,
+                "radial",
+                (self._cx, self._cy, self._r),
                 self._rl_colors,
                 self._positions,
                 self._extend,
+                self._clip_shape.getBounds(),
             )
             canvas.restoreState()
 

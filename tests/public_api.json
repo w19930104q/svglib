@@ -496,6 +496,9 @@
   "_default_language": {
    "what": "callable()"
   },
+  "_draw_gradient": {
+   "what": "callable(POSITIONAL_OR_KEYWORD:canvas, POSITIONAL_OR_KEYWORD:pdf_path, POSITIONAL_OR_KEYWORD:kind, POSITIONAL_OR_KEYWORD:geometry, POSITIONAL_OR_KEYWORD:rl_colors, POSITIONAL_OR_KEYWORD:positions, POSITIONAL_OR_KEYWORD:extend, POSITIONAL_OR_KEYWORD:clip_bounds)"
+  },
   "_expand_font_shorthand": {
    "what": "callable(POSITIONAL_OR_KEYWORD:declarations)"
   },
@@ -511,6 +514,12 @@
   "_fonts_register_font": {
    "what": "callable(POSITIONAL_OR_KEYWORD:font_name, POSITIONAL_OR_KEYWORD:font_path, POSITIONAL_OR_KEYWORD:weight, POSITIONAL_OR_KEYWORD:style, POSITIONAL_OR_KEYWORD:rlgFontName)"
   },
+  "_gradient_has_alpha": {
+   "what": "callable(POSITIONAL_OR_KEYWORD:rl_colors)"
+  },
+  "_inverse_affine": {
+   "what": "callable(POSITIONAL_OR_KEYWORD:matrix)"
+  },
   "_is_inside_text_path": {
    "what": "callable(POSITIONAL_OR_KEYWORD:node, POSITIONAL_OR_KEYWORD:text_node)"
   },
@@ -523,8 +532,17 @@
   "_parse_font_shorthand": {
    "what": "callable(POSITIONAL_OR_KEYWORD:value)"
   },
+  "_pdf_gradient_function": {
+   "what": "callable(POSITIONAL_OR_KEYWORD:color_stops, POSITIONAL_OR_KEYWORD:positions)"
+  },
+  "_register_smask_state": {
+   "what": "callable(POSITIONAL_OR_KEYWORD:canvas, POSITIONAL_OR_KEYWORD:mask_form_name)"
+  },
   "_renderPath": {
    "what": "external"
+  },
+  "_shading_form": {
+   "what": "callable(POSITIONAL_OR_KEYWORD:canvas, POSITIONAL_OR_KEYWORD:shading, POSITIONAL_OR_KEYWORD:bbox, POSITIONAL_OR_KEYWORD:form_matrix, POSITIONAL_OR_KEYWORD:clip_code, POSITIONAL_OR_KEYWORD:even_odd_clip)"
   },
   "_shape_to_pdf_path": {
    "what": "callable(POSITIONAL_OR_KEYWORD:canvas, POSITIONAL_OR_KEYWORD:shape)"

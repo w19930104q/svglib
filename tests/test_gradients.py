@@ -1,6 +1,9 @@
 """Linear and radial gradients."""
 
+from io import BytesIO
+
 import pytest
+from reportlab.graphics import renderPDF
 from reportlab.graphics.shapes import (
     Group,
     Rect,
@@ -11,6 +14,29 @@ from svglib.svglib import LinearGradientShape
 from tests.utils import (
     drawing_from_svg,
 )
+
+
+def _render_pdf(svg_content: str) -> bytes:
+    """Render an SVG string to PDF bytes through the real PDF renderer."""
+    drawing = drawing_from_svg(svg_content)
+    buffer = BytesIO()
+    renderPDF.drawToFile(drawing, buffer, showBoundary=0)
+    return buffer.getvalue()
+
+
+# A red -> blue horizontal gradient with a fully transparent first stop.
+_TRANSLUCENT_GRADIENT_SVG = """
+    <?xml version="1.0"?>
+    <svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+        <defs>
+            <linearGradient id="grad1" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="red" stop-opacity="0"/>
+                <stop offset="1" stop-color="blue" stop-opacity="1"/>
+            </linearGradient>
+        </defs>
+        <rect x="0" y="0" width="80" height="80" fill="url(#grad1)"/>
+    </svg>
+"""
 
 
 class TestGradients:
@@ -267,3 +293,91 @@ class TestGradients:
     def test_fill_url_enclosed_double_quotes_strip_parenthesis(self):
         """Fill url enclosed double quotes."""
         self._process_test_fill_url("""'url( "#grad)1" )'""", "grad)1")
+
+    def test_opaque_gradient_uses_plain_shading(self):
+        """An opaque gradient must stay a single shading, without soft masks."""
+        svg = """
+            <?xml version="1.0"?>
+            <svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+                <defs>
+                    <linearGradient id="grad1" x1="0" y1="0" x2="1" y2="0">
+                        <stop offset="0" stop-color="red"/>
+                        <stop offset="1" stop-color="blue"/>
+                    </linearGradient>
+                </defs>
+                <rect x="0" y="0" width="80" height="80" fill="url(#grad1)"/>
+            </svg>
+        """
+        pdf = _render_pdf(svg)
+        assert b"/ShadingType 2" in pdf
+        # No transparency machinery is needed when every stop is opaque.
+        assert b"/SMask" not in pdf
+        assert b"/Luminosity" not in pdf
+
+    def test_stop_opacity_emits_soft_mask(self):
+        """A translucent stop must survive into the PDF as an alpha soft mask.
+
+        ReportLab's canvas gradient API drops the alpha channel, so svglib
+        has to emit a DeviceGray alpha shading wrapped in a luminosity
+        /SMask graphics state rather than only the RGB shading.
+        """
+        pdf = _render_pdf(_TRANSLUCENT_GRADIENT_SVG)
+        # The color gradient stays an RGB axial shading ...
+        assert b"/ShadingType 2" in pdf
+        assert b"/DeviceRGB" in pdf
+        # ... and the per-stop opacity is represented as a gray shading used
+        # by a luminosity soft mask (white = opaque, black = transparent).
+        assert b"/DeviceGray" in pdf
+        assert b"/Luminosity" in pdf
+        assert b"/SMask" in pdf
+
+    def test_stop_opacity_zero_is_black_in_mask(self):
+        """The alpha shading must interpolate from black (opacity 0) to white."""
+        pdf = _render_pdf(_TRANSLUCENT_GRADIENT_SVG)
+        # The gray function's C0/C1 encode the stop-opacity values 0 and 1.
+        assert b"/C0 [ 0 ]" in pdf
+        assert b"/C1 [ 1 ]" in pdf
+
+    def test_soft_mask_keeps_clip_inside_forms(self):
+        """The clip path must live in the form streams, not on the page state.
+
+        A page-level clip combined with an active soft mask makes viewers
+        zero the mask coverage outside the clip, so the clip operators are
+        emitted inside each shading form instead.
+        """
+        pdf = _render_pdf(_TRANSLUCENT_GRADIENT_SVG)
+        assert b"/Subtype /Form" in pdf
+        # Clip operators appear in a form stream together with the shading.
+        assert b"W* n" in pdf
+
+    def test_radial_gradient_stop_opacity(self):
+        """Radial gradients must also carry their stop opacity into the PDF."""
+        svg = """
+            <?xml version="1.0"?>
+            <svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+                <defs>
+                    <radialGradient id="rg" cx="0.5" cy="0.5" r="0.5">
+                        <stop offset="0" stop-color="red" stop-opacity="1"/>
+                        <stop offset="1" stop-color="blue" stop-opacity="0"/>
+                    </radialGradient>
+                </defs>
+                <circle cx="50" cy="50" r="40" fill="url(#rg)"/>
+            </svg>
+        """
+        pdf = _render_pdf(svg)
+        assert b"/ShadingType 3" in pdf  # radial shading
+        assert b"/Luminosity" in pdf
+        assert b"/SMask" in pdf
+
+    def test_solid_fill_unaffected_by_gradient_code(self):
+        """A plain solid fill must produce no shading or soft mask objects."""
+        svg = """
+            <?xml version="1.0"?>
+            <svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+                <rect x="0" y="0" width="80" height="80" fill="green"/>
+            </svg>
+        """
+        pdf = _render_pdf(svg)
+        assert b"/ShadingType" not in pdf
+        assert b"/SMask" not in pdf
+        assert b"/Luminosity" not in pdf
