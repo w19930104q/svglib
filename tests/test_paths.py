@@ -228,6 +228,110 @@ class TestPaths:
         path = converter.convertPath(node).contents[0]
         assert path.points == [334.5, 0.0, 334.5, 185.0, 334.5, 185.0]
 
+    @pytest.mark.parametrize(
+        ("sweep", "expected_mid_y"),
+        [(0, 110.0), (1, 50.0)],
+    )
+    def test_arc_sweep_flag_selects_the_filled_half(self, sweep, expected_mid_y):
+        """The sweep flag decides which side of the chord the arc bulges to.
+
+        A semicircle (chord length equals the diameter) must fill a whole half
+        disk instead of collapsing to a thin strip along the chord. In SVG
+        screen coordinates sweep 0 bulges downwards, sweep 1 upwards.
+        """
+        converter = svglib.Svg2RlgShapeConverter(None)
+        node = minimal_svg_node(f'<path d="M20,80 A30,30 0 0 {sweep} 80,80 Z"/>')
+        path = converter.convertPath(node).contents[0]
+        assert path.operators == [_MOVETO, _CURVETO, _CURVETO, _CLOSEPATH]
+        # The arc is approximated by two quarter-circle Beziers; the end point
+        # of the first fragment is the midpoint of the half disk.
+        midpoint = path.points[6:8]
+        assert midpoint == pytest.approx([50.0, expected_mid_y])
+        # On-curve points only (fragment starts and ends, excluding controls):
+        # the fill spans the full radius of 30 units away from the chord.
+        on_curve_y = [path.points[1], *path.points[7::6], path.points[-1]]
+        if sweep == 0:
+            assert min(on_curve_y) == pytest.approx(80.0)
+            assert max(on_curve_y) == pytest.approx(110.0)
+        else:
+            assert min(on_curve_y) == pytest.approx(50.0)
+            assert max(on_curve_y) == pytest.approx(80.0)
+
+    def test_arc_large_arc_flag_spans_the_major_arc(self):
+        """With the large-arc flag set the curve takes the long way round, so
+        the fill extends well past the chord on the sweep-selected side."""
+        converter = svglib.Svg2RlgShapeConverter(None)
+        node = minimal_svg_node('<path d="M20,80 A40,40 0 1 0 80,80 Z"/>')
+        path = converter.convertPath(node).contents[0]
+        # Control points sit outside the ellipse, so flatten the Beziers to
+        # measure where the actual curve goes. Sweep 0 bulges downwards; the
+        # major arc reaches y ~146.46 (versus 93.54 for the minor arc).
+        segments = utils.flatten_path(path.operators, path.points, 40)
+        y_coordinates = [y for segment in segments for y in (segment[1], segment[3])]
+        assert min(y_coordinates) == pytest.approx(80.0)
+        assert max(y_coordinates) == pytest.approx(146.458, abs=1e-3)
+
+    def test_relative_arc_uses_the_current_point_as_origin(self):
+        converter = svglib.Svg2RlgShapeConverter(None)
+        absolute = minimal_svg_node('<path d="M20,80 A40,40 0 0 0 80,80 Z"/>')
+        relative = minimal_svg_node('<path d="M20,80 a40,40 0 0 0 60,0 Z"/>')
+        absolute_path = converter.convertPath(absolute).contents[0]
+        relative_path = converter.convertPath(relative).contents[0]
+        assert relative_path.operators == absolute_path.operators
+        assert relative_path.points == pytest.approx(absolute_path.points)
+
+    def test_arc_beziers_lie_on_the_target_ellipse(self):
+        """Flattened points of a rotated elliptical arc satisfy the implicit
+        equation of the ellipse determined by the W3C endpoint conversion."""
+        x1, y1, rx, ry, phi, f_a, f_s, x2, y2 = (
+            0.0,
+            0.0,
+            10.0,
+            5.0,
+            45.0,
+            1,
+            0,
+            7.0,
+            7.0,
+        )
+        curves = utils.bezier_arc_from_end_points(x1, y1, rx, ry, phi, f_a, f_s, x2, y2)
+        # The conversion pre-rotates the endpoints into the ellipse frame and
+        # solves the unrotated problem there; mirror that to find the ellipse.
+        to_frame = utils.mmult(utils.rotate(-phi), utils.translate(-x1, -y1))
+        tx2, ty2 = utils.transformPoint(to_frame, (x2, y2))
+        cx, cy, rx2, ry2, _, _ = utils.end_point_to_center_parameters(
+            0, 0, tx2, ty2, f_a, f_s, rx, ry
+        )
+
+        def cubic_point(p0, p1, p2, p3, t):
+            u = 1 - t
+            return (
+                u**3 * p0[0]
+                + 3 * u**2 * t * p1[0]
+                + 3 * u * t**2 * p2[0]
+                + t**3 * p3[0],
+                u**3 * p0[1]
+                + 3 * u**2 * t * p1[1]
+                + 3 * u * t**2 * p2[1]
+                + t**3 * p3[1],
+            )
+
+        for curve in curves:
+            for t in range(21):
+                point = cubic_point(
+                    (curve[0], curve[1]),
+                    (curve[2], curve[3]),
+                    (curve[4], curve[5]),
+                    (curve[6], curve[7]),
+                    t / 20,
+                )
+                qx, qy = utils.transformPoint(to_frame, point)
+                residual = ((qx - cx) / rx2) ** 2 + ((qy - cy) / ry2) ** 2
+                assert residual == pytest.approx(1.0, abs=2e-3)
+        # The arc starts and ends at the requested endpoints.
+        assert curves[0][:2] == pytest.approx([x1, y1])
+        assert curves[-1][6:] == pytest.approx([x2, y2])
+
     def test_unclosed_paths(self):
         converter = svglib.Svg2RlgShapeConverter(None)
         node = minimal_svg_node('<path d="M0,0 4.5,3 0,6M4.5,3H9" id="W"/>')
